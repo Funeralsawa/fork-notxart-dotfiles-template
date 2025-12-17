@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+
+# Exit immediately if a command exits with a non-zero status, if an unset
+# variable is used, or if a command in a pipeline fails.
+set -euo pipefail
+
+# --- Helper Functions ---
+
+# Print a message in a consistent, colorful format.
+# Usage: log "This is a message."
+log() {
+    # Blue color for the prompt arrow
+    echo -e "\n\033[1;34m❯❯❯ $1\033[0m"
+}
+
+# Print an error message.
+# Usage: error "Something went wrong."
+error() {
+    # Red color for error messages
+    echo -e "\n\033[1;31mError: $1\033[0m" >&2
+}
+
+# Check if a command exists.
+# Usage: command_exists "git"
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# --- Main Installation Logic ---
+
+# Install necessary packages, handling different package managers.
+install_packages() {
+    log "Installing necessary packages..."
+    # A common set of development and shell enhancement tools.
+    local pkgs="curl fzf gawk git gnupg2 man-db starship vim zoxide"
+
+    if ! command_exists sudo; then
+        error "sudo command not found. Please install the packages manually: $pkgs"
+        return 1
+    fi
+
+    log "You may be prompted for your password to install packages via sudo."
+
+    if command_exists apt-get; then
+        sudo apt-get update && sudo apt-get install -y build-essential $pkgs
+    elif command_exists dnf; then
+        sudo dnf groupinstall -y "Development Tools"
+        sudo dnf install -y $pkgs
+    elif command_exists pacman; then
+        sudo pacman -Syu --noconfirm --needed base-devel $pkgs
+    elif command_exists brew; then
+        # On macOS, build tools are part of Xcode Command Line Tools, often installed with brew.
+        brew install ${pkgs// / }
+    else
+        error "Could not detect package manager. Please install packages manually: $pkgs"
+        return 1
+    fi
+    log "Packages installed successfully."
+}
+
+# Set up XDG Base Directories to organize config, data, and cache files.
+# Ref: https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
+setup_xdg_dirs() {
+    log "Setting up XDG base directories..."
+    export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+    export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+    export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+    export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+
+    mkdir -p "$XDG_CONFIG_HOME"
+    mkdir -p "$XDG_CACHE_HOME"
+    mkdir -p "$XDG_DATA_HOME"
+    mkdir -p "$XDG_STATE_HOME"
+    mkdir -p "$HOME/.local/bin" # Standard location for user-specific binaries
+    log "XDG directories are ready."
+}
+
+# Create symbolic links for dotfiles, backing up any existing configurations.
+setup_symlinks() {
+    log "Setting up symlinks..."
+    # Get the absolute path of the directory where this script is located.
+    # This makes the script runnable from anywhere.
+    local DOTFILES_DIR
+    DOTFILES_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+    local BACKUP_DIR="$HOME/.dotfiles_backup_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$BACKUP_DIR"
+    log "Backups of existing files will be stored in $BACKUP_DIR"
+
+    # Define files and directories to symlink in "source:destination" format.
+    local links=(
+        ".bash_profile:$HOME/.bash_profile"
+        ".bashrc:$HOME/.bashrc"
+        "config/starship.toml:$XDG_CONFIG_HOME/starship.toml"
+        "config/bash:$XDG_CONFIG_HOME/bash"
+        "config/git:$XDG_CONFIG_HOME/git"
+    )
+
+    for link in "${links[@]}"; do
+        local src="${link%%:*}"
+        local dest="${link#*:}"
+
+        # Resolve full paths
+        local full_src="$DOTFILES_DIR/$src"
+        local full_dest="$dest"
+
+        # Ensure the parent directory of the destination exists.
+        mkdir -p "$(dirname "$full_dest")"
+
+        # If destination exists and is a regular file/dir (not a symlink), back it up.
+        if [ -e "$full_dest" ] && [ ! -L "$full_dest" ]; then
+            log "Backing up existing file/directory: $full_dest"
+            mv "$full_dest" "$BACKUP_DIR/"
+        fi
+
+        # If the destination is a broken symlink, remove it.
+        if [ -L "$full_dest" ] && [ ! -e "$full_dest" ]; then
+            log "Removing broken symlink: $full_dest"
+            rm "$full_dest"
+        fi
+
+        # Create symlink if it doesn't already exist.
+        if [ ! -e "$full_dest" ]; then
+            log "Creating symlink: $full_dest -> $full_src"
+            ln -s "$full_src" "$full_dest"
+        else
+            log "Symlink already exists: $full_dest"
+        fi
+    done
+    log "Symlinks created successfully."
+}
+
+# Configure GnuPG to use the XDG data directory.
+configure_gpg() {
+    log "Configuring GnuPG..."
+    local GPG_HOME="$XDG_DATA_HOME/gnupg"
+    mkdir -p "$GPG_HOME"
+
+    # Correctly determine the user to chown to, even when run with sudo.
+    local owner
+    if [[ -n "${SUDO_USER-}" ]]; then
+        owner="$SUDO_USER"
+    else
+        owner="$(whoami)"
+    fi
+
+    # Set secure permissions required by GnuPG.
+    chown -R "$owner" "$GPG_HOME"
+    chmod 700 "$GPG_HOME"
+
+    log "GnuPG home set to $GPG_HOME with correct permissions for user '$owner'."
+}
+
+# Main function to orchestrate the entire setup process.
+main() {
+    log "Starting Bash dotfiles setup..."
+
+    install_packages
+    setup_xdg_dirs
+    setup_symlinks
+    configure_gpg
+
+    log "Setup complete! Please restart your shell or run 'source ~/.bashrc' to apply changes."
+}
+
+# Execute the main function to start the script.
+main
